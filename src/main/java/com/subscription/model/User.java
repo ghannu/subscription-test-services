@@ -55,6 +55,19 @@ public class User implements UserDetails {
     @JoinColumn(name = "organization_id")
     private Organization organization;
     
+    // Aadhaar verification fields
+    @Column(name = "aadhaar_number")
+    private String aadhaarNumber;
+    
+    @Column(name = "aadhaar_verified")
+    private Boolean aadhaarVerified;
+    
+    @Column(name = "aadhaar_verification_id")
+    private String aadhaarVerificationId;
+    
+    @Column(name = "aadhaar_verified_at")
+    private LocalDateTime aadhaarVerifiedAt;
+    
     private LocalDateTime createdAt;
     
     private LocalDateTime updatedAt;

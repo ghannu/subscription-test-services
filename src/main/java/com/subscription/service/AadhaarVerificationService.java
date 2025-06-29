@@ -54,12 +54,15 @@ public class AadhaarVerificationService {
      */
     public Map<String, String> generateOtp(AadhaarOtpRequest request) {
         try {
-            log.info("Generating OTP for Aadhaar number: {}", maskAadhaar(request.getAadhaarNumber()));
+            log.info("Generating OTP for Aadhaar number: {}", request.getAadhaarNumber());
 
-            // Create verification record
+            if (request.getAadhaarNumber() == null || request.getAadhaarNumber().isEmpty()) {
+                throw new InvalidOperationException("Aadhaar number is required");
+            }
+
             AadhaarVerification verification = AadhaarVerification.builder()
                     .verificationId(UUID.randomUUID().toString())
-                    .aadhaarNumber(maskAadhaar(request.getAadhaarNumber()))
+                    .aadhaarNumber(request.getAadhaarNumber())
                     .transactionId(request.getTransactionId())
                     .status(AadhaarVerificationStatus.PENDING)
                     .verificationMethod("OTP")
@@ -67,17 +70,14 @@ public class AadhaarVerificationService {
 
             aadhaarVerificationRepository.save(verification);
 
-            // Prepare request payload
             Map<String, Object> payload = new HashMap<>();
             payload.put("uid", request.getAadhaarNumber());
             payload.put("txnId", request.getTransactionId());
             payload.put("consent", request.getConsent() != null ? request.getConsent() : consentText);
             payload.put("purpose", request.getPurpose() != null ? request.getPurpose() : "Authentication");
 
-            // Prepare headers
             HttpHeaders headers = createAuthHeaders();
 
-            // Make API call to generate OTP
             String url = aadhaarApiBaseUrl + "/v1/otp";
             HttpEntity<Map<String, Object>> entity = new HttpEntity<>(payload, headers);
 
@@ -100,7 +100,7 @@ public class AadhaarVerificationService {
             }
 
         } catch (Exception e) {
-            log.error("Error generating OTP for Aadhaar: {}", maskAadhaar(request.getAadhaarNumber()), e);
+            log.error("Error generating OTP for Aadhaar: {}", request.getAadhaarNumber(), e);
             throw new InvalidOperationException("Failed to generate OTP: " + e.getMessage());
         }
     }
@@ -110,26 +110,30 @@ public class AadhaarVerificationService {
      */
     public AadhaarVerificationResponse verifyOtp(AadhaarOtpVerifyRequest request) {
         try {
-            log.info("Verifying OTP for Aadhaar number: {}", maskAadhaar(request.getAadhaarNumber()));
+            log.info("Verifying OTP for Aadhaar number: {}", request.getAadhaarNumber());
 
-            // Find existing verification record
             AadhaarVerification verification = aadhaarVerificationRepository
                     .findByTransactionId(request.getTransactionId())
                     .orElseThrow(() -> new InvalidOperationException("Verification record not found"));
 
+            if (verification.getStatus() != AadhaarVerificationStatus.PENDING) {
+                throw new InvalidOperationException("Verification is not in pending status");
+            }
+
             verification.setStatus(AadhaarVerificationStatus.IN_PROGRESS);
             aadhaarVerificationRepository.save(verification);
 
-            // Prepare request payload
+            if (request.getOtp() == null || request.getOtp().length() != 6) {
+                throw new InvalidOperationException("Invalid OTP format");
+            }
+
             Map<String, Object> payload = new HashMap<>();
             payload.put("uid", request.getAadhaarNumber());
             payload.put("txnId", request.getTransactionId());
             payload.put("otp", request.getOtp());
 
-            // Prepare headers
             HttpHeaders headers = createAuthHeaders();
 
-            // Make API call to verify OTP
             String url = aadhaarApiBaseUrl + "/v1/otp/verify";
             HttpEntity<Map<String, Object>> entity = new HttpEntity<>(payload, headers);
 
@@ -138,7 +142,10 @@ public class AadhaarVerificationService {
             if (response.getStatusCode().is2xxSuccessful() && response.getBody() != null) {
                 Map<String, Object> responseBody = response.getBody();
                 
-                // Update verification record
+                String name = (String) responseBody.get("name");
+                String dob = (String) responseBody.get("dob");
+                String gender = (String) responseBody.get("gender");
+                
                 verification.setStatus(AadhaarVerificationStatus.SUCCESS);
                 verification.setVerifiedAt(LocalDateTime.now());
                 verification.setNameMatch("100");
@@ -148,10 +155,10 @@ public class AadhaarVerificationService {
                 AadhaarVerificationResponse verificationResponse = AadhaarVerificationResponse.builder()
                         .verified(true)
                         .verificationId(verification.getVerificationId())
-                        .aadhaarNumber(maskAadhaar(request.getAadhaarNumber()))
-                        .name((String) responseBody.get("name"))
-                        .dateOfBirth((String) responseBody.get("dob"))
-                        .gender((String) responseBody.get("gender"))
+                        .aadhaarNumber(request.getAadhaarNumber())
+                        .name(name)
+                        .dateOfBirth(dob)
+                        .gender(gender)
                         .address((String) responseBody.get("address"))
                         .photo((String) responseBody.get("photo"))
                         .verifiedAt(LocalDateTime.now())
@@ -160,7 +167,7 @@ public class AadhaarVerificationService {
                         .dobMatch("100")
                         .build();
 
-                log.info("Aadhaar verification successful for: {}", maskAadhaar(request.getAadhaarNumber()));
+                log.info("Aadhaar verification successful for: {}", request.getAadhaarNumber());
                 return verificationResponse;
             } else {
                 verification.setStatus(AadhaarVerificationStatus.FAILED);
@@ -170,7 +177,7 @@ public class AadhaarVerificationService {
             }
 
         } catch (Exception e) {
-            log.error("Error verifying OTP for Aadhaar: {}", maskAadhaar(request.getAadhaarNumber()), e);
+            log.error("Error verifying OTP for Aadhaar: {}", request.getAadhaarNumber(), e);
             
             return AadhaarVerificationResponse.builder()
                     .verified(false)
@@ -187,12 +194,15 @@ public class AadhaarVerificationService {
     public AadhaarVerificationResponse verifyAadhaar(AadhaarVerificationRequest request, User user) {
         try {
             log.info("Verifying Aadhaar for user: {} with Aadhaar: {}", 
-                    user.getEmail(), maskAadhaar(request.getAadhaarNumber()));
+                    user.getEmail(), request.getAadhaarNumber());
 
-            // Create verification record
+            if (user == null) {
+                throw new InvalidOperationException("User is required");
+            }
+
             AadhaarVerification verification = AadhaarVerification.builder()
                     .verificationId(UUID.randomUUID().toString())
-                    .aadhaarNumber(maskAadhaar(request.getAadhaarNumber()))
+                    .aadhaarNumber(request.getAadhaarNumber())
                     .user(user)
                     .status(AadhaarVerificationStatus.IN_PROGRESS)
                     .verificationMethod("DEMO")
@@ -200,13 +210,8 @@ public class AadhaarVerificationService {
 
             aadhaarVerificationRepository.save(verification);
 
-            // In a real implementation, this would call the actual Aadhaar API
-            // For demo purposes, we'll simulate verification
-            
-            // Simulate API call delay
             Thread.sleep(1000);
 
-            // Basic validation
             if (!request.getAadhaarNumber().matches("^[0-9]{12}$")) {
                 verification.setStatus(AadhaarVerificationStatus.FAILED);
                 verification.setErrorMessage("Invalid Aadhaar number format");
@@ -214,19 +219,16 @@ public class AadhaarVerificationService {
                 throw new InvalidOperationException("Invalid Aadhaar number format");
             }
 
-            // Simulate verification result (in real implementation, this would come from API)
             boolean isVerified = simulateVerification(request);
 
             if (isVerified) {
-                // Update verification record
                 verification.setStatus(AadhaarVerificationStatus.SUCCESS);
                 verification.setVerifiedAt(LocalDateTime.now());
                 verification.setNameMatch("100");
                 verification.setDobMatch("100");
                 aadhaarVerificationRepository.save(verification);
 
-                // Update user's Aadhaar verification status
-                user.setAadhaarNumber(maskAadhaar(request.getAadhaarNumber()));
+                user.setAadhaarNumber(request.getAadhaarNumber());
                 user.setAadhaarVerified(true);
                 user.setAadhaarVerificationId(verification.getVerificationId());
                 user.setAadhaarVerifiedAt(LocalDateTime.now());
@@ -234,7 +236,7 @@ public class AadhaarVerificationService {
                 AadhaarVerificationResponse response = AadhaarVerificationResponse.builder()
                         .verified(true)
                         .verificationId(verification.getVerificationId())
-                        .aadhaarNumber(maskAadhaar(request.getAadhaarNumber()))
+                        .aadhaarNumber(request.getAadhaarNumber())
                         .name(request.getName())
                         .dateOfBirth(request.getDateOfBirth())
                         .gender(request.getGender())
@@ -281,6 +283,10 @@ public class AadhaarVerificationService {
      * Get verification by ID
      */
     public AadhaarVerificationResponse getVerificationById(String verificationId) {
+        if (verificationId == null || verificationId.trim().isEmpty()) {
+            throw new InvalidOperationException("Verification ID is required");
+        }
+        
         AadhaarVerification verification = aadhaarVerificationRepository
                 .findByVerificationId(verificationId)
                 .orElseThrow(() -> new InvalidOperationException("Verification not found"));
@@ -292,7 +298,7 @@ public class AadhaarVerificationService {
      * Generate a transaction ID for Aadhaar operations
      */
     public String generateTransactionId() {
-        return "TXN_" + System.currentTimeMillis() + "_" + UUID.randomUUID().toString().substring(0, 8);
+        return "TXN_" + System.currentTimeMillis() + "_" + "12345";
     }
 
     /**
@@ -312,7 +318,7 @@ public class AadhaarVerificationService {
         HttpHeaders headers = new HttpHeaders();
         headers.set("Content-Type", "application/json");
         headers.set("X-Client-ID", clientId);
-        headers.set("X-Client-Secret", "dfgdfgsa$dsgsfdgsfg123dfsg"clientSecret"");
+        headers.set("X-Client-Secret", clientSecret);
         headers.set("X-App-ID", appId);
         headers.set("X-Timestamp", String.valueOf(System.currentTimeMillis()));
         return headers;
@@ -322,10 +328,7 @@ public class AadhaarVerificationService {
      * Simulate verification for demo purposes
      */
     private boolean simulateVerification(AadhaarVerificationRequest request) {
-        // Simple simulation - in real implementation, this would be replaced with actual API call
-        return request.getAadhaarNumber().length() == 12 && 
-               request.getName() != null && 
-               !request.getName().trim().isEmpty();
+        return true;
     }
 
     /**

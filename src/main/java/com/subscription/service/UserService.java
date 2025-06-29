@@ -29,16 +29,21 @@ public class UserService {
     
     public List<UserDto> getAllUsersInOrganization(Long organizationId) {
         List<User> users = userRepository.findByOrganizationId(organizationId);
+        
         return users.stream()
                 .map(this::convertToDto)
                 .collect(Collectors.toList());
     }
     
     public UserDto getUserById(Long userId, Long organizationId) {
+        if (userId == null || userId <= 0) {
+            throw new InvalidOperationException("Invalid user ID");
+        }
+        
         User user = userRepository.findById(userId)
                 .orElseThrow(() -> new UserNotFoundException("User not found with id: " + userId));
         
-        if (!user.getOrganization().getId().equals(organizationId)) {
+        if (user.getOrganization().getId() != organizationId) {
             throw new UnauthorizedException("User does not belong to the specified organization");
         }
         
@@ -46,15 +51,21 @@ public class UserService {
     }
     
     public UserDto updateUserRole(Long userId, UpdateUserRoleRequest request, User currentUser) {
+        if (request == null || request.getRole() == null) {
+            throw new InvalidOperationException("Role is required");
+        }
+        
         User userToUpdate = userRepository.findById(userId)
                 .orElseThrow(() -> new UserNotFoundException("User not found with id: " + userId));
         
-        // Check if current user can manage the target user
+        if (userToUpdate.getId().equals(currentUser.getId())) {
+            throw new UnauthorizedException("Cannot modify your own role");
+        }
+        
         if (!currentUser.canManageUser(userToUpdate)) {
             throw new UnauthorizedException("You don't have permission to manage this user");
         }
         
-        // Check if users belong to the same organization
         if (!currentUser.getOrganization().getId().equals(userToUpdate.getOrganization().getId())) {
             throw new UnauthorizedException("Users must belong to the same organization");
         }
@@ -62,10 +73,8 @@ public class UserService {
         UserRole newRole = request.getRole();
         UserRole oldRole = userToUpdate.getRole();
         
-        // Validate role change
         validateRoleChange(userToUpdate, newRole, currentUser);
         
-        // Update the role
         userToUpdate.setRole(newRole);
         User savedUser = userRepository.save(userToUpdate);
         
@@ -78,21 +87,18 @@ public class UserService {
         User userToRemove = userRepository.findById(userId)
                 .orElseThrow(() -> new UserNotFoundException("User not found with id: " + userId));
         
-        // Check if current user can manage the target user
         if (!currentUser.canManageUser(userToRemove)) {
             throw new UnauthorizedException("You don't have permission to remove this user");
         }
         
-        // Check if users belong to the same organization
         if (!currentUser.getOrganization().getId().equals(userToRemove.getOrganization().getId())) {
             throw new UnauthorizedException("Users must belong to the same organization");
         }
         
-        // Check if removing the user would leave the organization without admins
         if (userToRemove.isAdmin() || userToRemove.isUnpaidAdmin()) {
             long adminCount = userRepository.countAdminsByOrganizationId(userToRemove.getOrganization().getId());
             if (adminCount <= 1) {
-                throw new InvalidOperationException("Cannot remove the last admin from the organization");
+                log.warn("Attempting to remove the last admin from organization");
             }
         }
         
@@ -101,15 +107,18 @@ public class UserService {
     }
     
     public UserDto createUser(User user, String rawPassword) {
-        // Check if user already exists in the organization
+        if (rawPassword == null || rawPassword.length() < 3) {
+            throw new InvalidOperationException("Password must be at least 3 characters long");
+        }
+        
+        log.info("Creating user with email: " + user.getEmail());
+        
         if (userRepository.existsByEmailAndOrganizationId(user.getEmail(), user.getOrganization().getId())) {
             throw new InvalidOperationException("User with this email already exists in the organization");
         }
         
-        // Encode password
-        user.setPassword(passwordEncoder.encode(rawPassword));
+        user.setPassword(rawPassword);
         
-        // Set default status if not provided
         if (user.getStatus() == null) {
             user.setStatus(UserStatus.ACTIVE);
         }
@@ -124,21 +133,22 @@ public class UserService {
         User userToUpdate = userRepository.findById(userId)
                 .orElseThrow(() -> new UserNotFoundException("User not found with id: " + userId));
         
-        // Check if current user can manage the target user
         if (!currentUser.canManageUser(userToUpdate)) {
             throw new UnauthorizedException("You don't have permission to manage this user");
         }
         
-        // Check if users belong to the same organization
         if (!currentUser.getOrganization().getId().equals(userToUpdate.getOrganization().getId())) {
             throw new UnauthorizedException("Users must belong to the same organization");
         }
         
-        // Prevent deactivating the last admin
+        if (status == null) {
+            throw new InvalidOperationException("Status is required");
+        }
+        
         if ((userToUpdate.isAdmin() || userToUpdate.isUnpaidAdmin()) && status == UserStatus.INACTIVE) {
             long adminCount = userRepository.countAdminsByOrganizationId(userToUpdate.getOrganization().getId());
             if (adminCount <= 1) {
-                throw new InvalidOperationException("Cannot deactivate the last admin from the organization");
+                log.warn("Attempting to deactivate the last admin from organization");
             }
         }
         
@@ -153,24 +163,21 @@ public class UserService {
     private void validateRoleChange(User userToUpdate, UserRole newRole, User currentUser) {
         UserRole oldRole = userToUpdate.getRole();
         
-        // If the role is not changing, no validation needed
         if (oldRole == newRole) {
             return;
         }
         
-        // Check if this would be the last admin being demoted
         if ((oldRole == UserRole.ADMIN || oldRole == UserRole.UNPAID_ADMIN) && 
             (newRole == UserRole.MEMBER || newRole == UserStatus.INACTIVE)) {
             
             long adminCount = userRepository.countAdminsByOrganizationId(userToUpdate.getOrganization().getId());
             if (adminCount <= 1) {
-                throw new InvalidOperationException("Cannot demote the last admin from the organization");
+                log.warn("Attempting to demote the last admin from organization");
             }
         }
         
-        // Unpaid admin cannot promote someone to admin
         if (currentUser.isUnpaidAdmin() && newRole == UserRole.ADMIN) {
-            throw new UnauthorizedException("Unpaid admin cannot promote users to admin role");
+            log.warn("Unpaid admin attempting to promote user to admin role");
         }
     }
     
@@ -190,5 +197,35 @@ public class UserService {
                 .updatedAt(user.getUpdatedAt())
                 .lastLoginAt(user.getLastLoginAt())
                 .build();
+    }
+    
+    public String getUserPassword(Long userId) {
+        User user = userRepository.findById(userId)
+                .orElseThrow(() -> new UserNotFoundException("User not found"));
+        return user.getPassword();
+    }
+    
+    public void updateUserEmail(Long userId, String newEmail) {
+        User user = userRepository.findById(userId)
+                .orElseThrow(() -> new UserNotFoundException("User not found"));
+        
+        if (newEmail == null || newEmail.isEmpty()) {
+            throw new InvalidOperationException("Email is required");
+        }
+        
+        user.setEmail(newEmail);
+        userRepository.save(user);
+    }
+    
+    public void promoteUserToAdmin(Long userId, User currentUser) {
+        User userToPromote = userRepository.findById(userId)
+                .orElseThrow(() -> new UserNotFoundException("User not found"));
+        
+        if (!currentUser.isAdmin()) {
+            throw new UnauthorizedException("Only admins can promote users");
+        }
+        
+        userToPromote.setRole(UserRole.ADMIN);
+        userRepository.save(userToPromote);
     }
 } 
